@@ -63,6 +63,7 @@ def agente(pergunta, df):
     pergunta = pergunta.lower()
 
 
+    # QUANTIDADE DE ESTADOS
     if "quantos estados" in pergunta:
 
         total = contar_estados(df)
@@ -73,16 +74,22 @@ def agente(pergunta, df):
         )
 
 
-    elif "qual região possui mais estados" in pergunta:
+    # REGIÃO COM MAIS ESTADOS
+    elif (
+        "região" in pergunta
+        and "mais" in pergunta
+        and "estados" in pergunta
+    ):
 
         regiao = regiao_com_mais_estados(df)
 
         return (
             f"A região com mais estados é "
-            f"a região {regiao}."
+            f"{regiao}."
         )
 
 
+    # REGIÃO NORDESTE
     elif "nordeste" in pergunta:
 
         estados = estados_por_regiao(
@@ -103,7 +110,6 @@ def agente(pergunta, df):
             "Tente perguntar sobre estados "
             "ou regiões."
         )
-
 
 # ========================================
 # DASHBOARD
