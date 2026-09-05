@@ -26,27 +26,9 @@ st.set_page_config(
 # CONFIGURAÇÃO DA OPENAI
 # ============================================================
 
-# Para testar no Google Colab, você pode usar getpass.
-# Para um dashboard publicado, recomenda-se utilizar st.secrets.
-
-import getpass
-
-# Solicita a chave apenas se ela ainda não estiver armazenada
-# na sessão do Streamlit.
-if "api_key" not in st.session_state:
-
-    api_key = getpass.getpass(
-        "Digite sua chave da API da OpenAI: "
-    )
-
-    st.session_state.api_key = api_key
-
-
-# Cria o cliente da OpenAI
 client = OpenAI(
-    api_key=st.session_state.api_key
+    api_key=st.secrets["OPENAI_API_KEY"]
 )
-
 
 # ============================================================
 # FUNÇÃO 1
