@@ -1,4 +1,5 @@
-requests
-pandas
-plotly.express
 streamlit
+openai
+pandas
+requests
+plotly
