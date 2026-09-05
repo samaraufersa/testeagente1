@@ -1,94 +1,70 @@
-import streamlit as st
-import pandas as pd
+
+import json
+import re
 import requests
+import pandas as pd
 import plotly.express as px
-from ollama import chat
+import torch
 
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# ============================================================
-# CONFIGURAÇÃO DA PÁGINA
-# ============================================================
+print("CUDA disponível:", torch.cuda.is_available())
 
-st.set_page_config(
-    page_title="Dashboard IBGE + LLM",
-    page_icon="🤖",
-    layout="wide"
-)
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
 
+url = "https://servicodados.ibge.gov.br/api/v1/localidades/estados"
 
-# ============================================================
-# TÍTULO
-# ============================================================
+resposta = requests.get(url, timeout=30)
+resposta.raise_for_status()
 
-st.title("🤖 Dashboard IBGE + LLM")
-st.subheader("Análise dos estados brasileiros com Inteligência Artificial")
+dados = resposta.json()
 
+df = pd.json_normalize(dados)
 
-# ============================================================
-# 1. BUSCAR DADOS DO IBGE
-# ============================================================
-
-@st.cache_data
-def carregar_dados():
-
-    url = "https://servicodados.ibge.gov.br/api/v1/localidades/estados"
-
-    resposta = requests.get(url, timeout=30)
-
-    resposta.raise_for_status()
-
-    dados = resposta.json()
-
-    df = pd.json_normalize(dados)
-
-    df = df[
-        [
-            "id",
-            "sigla",
-            "nome",
-            "regiao.nome"
-        ]
-    ]
-
-    df.columns = [
-        "codigo",
+df = df[
+    [
+        "id",
         "sigla",
-        "estado",
-        "regiao"
+        "nome",
+        "regiao.nome"
     ]
+]
 
-    df = df.sort_values(
-        by=["regiao", "estado"]
-    ).reset_index(drop=True)
+df.columns = [
+    "codigo",
+    "sigla",
+    "estado",
+    "regiao"
+]
 
-    return df
+df = df.sort_values(
+    by=["regiao", "estado"]
+).reset_index(drop=True)
 
+print("DataFrame carregado com sucesso!")
+print("Total de unidades federativas:", len(df))
 
-df = carregar_dados()
+display(df)
 
-
-# ============================================================
-# 2. FUNÇÕES QUE SERÃO USADAS COMO TOOLS PELA LLM
-# ============================================================
 
 def contar_estados():
-
-    # O IBGE retorna 27 unidades federativas:
-    # 26 estados + Distrito Federal.
-    #
-    # Como a pergunta é sobre ESTADOS,
-    # retiramos o Distrito Federal.
-
-    quantidade = len(
-        df[df["sigla"] != "DF"]
-    )
+    """
+    Conta os estados brasileiros.
+    O Distrito Federal não é considerado um estado.
+    """
+    
+    dados = df[df["sigla"] != "DF"]
 
     return {
-        "quantidade_estados": quantidade
+        "quantidade": len(dados)
     }
 
 
 def regiao_com_mais_estados():
+    """
+    Descobre qual região possui mais estados.
+    """
 
     dados = df[df["sigla"] != "DF"]
 
@@ -106,6 +82,9 @@ def regiao_com_mais_estados():
 
 
 def regiao_com_menos_estados():
+    """
+    Descobre qual região possui menos estados.
+    """
 
     dados = df[df["sigla"] != "DF"]
 
@@ -122,7 +101,10 @@ def regiao_com_menos_estados():
     }
 
 
-def estados_por_regiao(regiao: str):
+def estados_por_regiao(regiao):
+    """
+    Lista os estados de uma determinada região.
+    """
 
     dados = df[
         (df["regiao"].str.lower() == regiao.lower()) &
@@ -131,21 +113,23 @@ def estados_por_regiao(regiao: str):
 
     return {
         "regiao": regiao,
-        "estados": dados["estado"].tolist(),
-        "quantidade": len(dados)
+        "quantidade": len(dados),
+        "estados": dados["estado"].tolist()
     }
 
 
-def estados_por_sigla(sigla: str):
+def estado_por_sigla(sigla):
+    """
+    Retorna informações de um estado usando sua sigla.
+    """
 
     resultado = df[
         df["sigla"].str.upper() == sigla.upper()
     ]
 
     if resultado.empty:
-
         return {
-            "erro": f"Nenhum estado encontrado com a sigla {sigla}"
+            "erro": f"Nenhum estado encontrado para a sigla {sigla}."
         }
 
     linha = resultado.iloc[0]
@@ -158,12 +142,12 @@ def estados_por_sigla(sigla: str):
 
 
 def listar_regioes():
+    """
+    Lista as regiões brasileiras.
+    """
 
-    regioes = (
-        df["regiao"]
-        .drop_duplicates()
-        .sort_values()
-        .tolist()
+    regioes = sorted(
+        df["regiao"].unique().tolist()
     )
 
     return {
@@ -171,154 +155,189 @@ def listar_regioes():
     }
 
 
-# ============================================================
-# 3. DESCRIÇÃO DAS TOOLS PARA A LLM
-# ============================================================
+print("Tools criadas com sucesso!")
 
-tools = [
 
-    {
-        "type": "function",
-        "function": {
-            "name": "contar_estados",
-            "description": (
-                "Retorna a quantidade de estados do Brasil. "
-                "Não considera o Distrito Federal como estado."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+FUNCOES = {
+    "contar_estados": contar_estados,
+    "regiao_com_mais_estados": regiao_com_mais_estados,
+    "regiao_com_menos_estados": regiao_com_menos_estados,
+    "estados_por_regiao": estados_por_regiao,
+    "estado_por_sigla": estado_por_sigla,
+    "listar_regioes": listar_regioes
+}
+
+TOOLS = {
+    "contar_estados": {
+        "descricao": "Conta quantos estados existem no Brasil. Não considera o Distrito Federal.",
+        "argumentos": {}
+    },
+
+    "regiao_com_mais_estados": {
+        "descricao": "Descobre qual região brasileira possui mais estados.",
+        "argumentos": {}
+    },
+
+    "regiao_com_menos_estados": {
+        "descricao": "Descobre qual região brasileira possui menos estados.",
+        "argumentos": {}
+    },
+
+    "estados_por_regiao": {
+        "descricao": "Lista os estados pertencentes a uma região brasileira.",
+        "argumentos": {
+            "regiao": "Nome da região. Exemplo: Nordeste"
         }
     },
 
-    {
-        "type": "function",
-        "function": {
-            "name": "regiao_com_mais_estados",
-            "description": (
-                "Retorna a região brasileira que possui "
-                "a maior quantidade de estados."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+    "estado_por_sigla": {
+        "descricao": "Retorna o estado e sua região a partir de uma sigla.",
+        "argumentos": {
+            "sigla": "Sigla do estado. Exemplo: PB"
         }
     },
 
-    {
-        "type": "function",
-        "function": {
-            "name": "regiao_com_menos_estados",
-            "description": (
-                "Retorna a região brasileira que possui "
-                "a menor quantidade de estados."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
+    "listar_regioes": {
+        "descricao": "Lista as regiões brasileiras.",
+        "argumentos": {}
+    }
+}
 
-    {
-        "type": "function",
-        "function": {
-            "name": "estados_por_regiao",
-            "description": (
-                "Retorna os estados pertencentes a uma determinada "
-                "região brasileira."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "regiao": {
-                        "type": "string",
-                        "description": (
-                            "Nome da região brasileira. "
-                            "Exemplo: Nordeste."
-                        )
-                    }
-                },
-                "required": ["regiao"]
-            }
-        }
-    },
+print("Catálogo de Tools criado!")
 
-    {
-        "type": "function",
-        "function": {
-            "name": "estados_por_sigla",
-            "description": (
-                "Retorna o nome e a região de um estado "
-                "a partir da sua sigla."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sigla": {
-                        "type": "string",
-                        "description": (
-                            "Sigla do estado. "
-                            "Exemplo: PB."
-                        )
-                    }
-                },
-                "required": ["sigla"]
-            }
-        }
-    },
 
-    {
-        "type": "function",
-        "function": {
-            "name": "listar_regioes",
-            "description": (
-                "Retorna a lista das regiões brasileiras."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
+
+print("Carregando tokenizer...")
+
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_NAME
+)
+
+print("Carregando modelo...")
+
+if torch.cuda.is_available():
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+
+else:
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.float32
+    )
+
+print("Modelo carregado com sucesso!")
+
+
+def perguntar_llm(mensagens, max_new_tokens=300):
+
+    texto = tokenizer.apply_chat_template(
+        mensagens,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    entradas = tokenizer(
+        texto,
+        return_tensors="pt"
+    )
+
+    if torch.cuda.is_available():
+
+        entradas = {
+            chave: valor.to(model.device)
+            for chave, valor in entradas.items()
         }
+
+    with torch.no_grad():
+
+        saida = model.generate(
+            **entradas,
+            max_new_tokens=max_new_tokens,
+            do_sample=False
+        )
+
+    novos_tokens = saida[
+        0,
+        entradas["input_ids"].shape[1]:
+    ]
+
+    resposta = tokenizer.decode(
+        novos_tokens,
+        skip_special_tokens=True
+    )
+
+    return resposta.strip()
+
+
+mensagens = [
+    {
+        "role": "system",
+        "content": "Você é um assistente que responde em português do Brasil."
+    },
+    {
+        "role": "user",
+        "content": "Explique de forma simples o que é uma LLM."
     }
 ]
 
+resposta = perguntar_llm(mensagens)
 
-# ============================================================
-# 4. MAPEAR NOME DA TOOL PARA FUNÇÃO PYTHON
-# ============================================================
+print(resposta)
 
-funcoes = {
 
-    "contar_estados":
-        contar_estados,
+PROMPT_AGENTE = """
+Você é um agente de análise de dados do IBGE.
 
-    "regiao_com_mais_estados":
-        regiao_com_mais_estados,
+Você possui ferramentas Python que consultam um DataFrame
+com informações sobre os estados brasileiros.
 
-    "regiao_com_menos_estados":
-        regiao_com_menos_estados,
+Quando a pergunta depender dos dados do DataFrame,
+você deve usar uma ferramenta.
 
-    "estados_por_regiao":
-        estados_por_regiao,
+Não invente números.
 
-    "estados_por_sigla":
-        estados_por_sigla,
+Você deve responder EXATAMENTE em um dos formatos abaixo.
 
-    "listar_regioes":
-        listar_regioes
+Para usar uma ferramenta:
+
+{
+    "acao": "usar_tool",
+    "tool": "NOME_DA_TOOL",
+    "argumentos": {}
 }
 
+Para responder diretamente:
 
-# ============================================================
-# 5. FUNÇÃO DO AGENTE
-# ============================================================
+{
+    "acao": "responder",
+    "resposta": "Sua resposta"
+}
+
+Ferramentas disponíveis:
+
+"""
+
+for nome, info in TOOLS.items():
+
+    PROMPT_AGENTE += f"""
+
+TOOL: {nome}
+
+Descrição:
+{info["descricao"]}
+
+Argumentos:
+{json.dumps(info["argumentos"], ensure_ascii=False)}
+
+"""
+
+print(PROMPT_AGENTE)
 
 def executar_agente(pergunta):
 
@@ -326,26 +345,7 @@ def executar_agente(pergunta):
 
         {
             "role": "system",
-            "content": """
-Você é um assistente especializado nos dados do IBGE
-disponíveis neste aplicativo.
-
-Você deve responder perguntas sobre estados e regiões
-brasileiras.
-
-IMPORTANTE:
-
-Quando a pergunta depender dos dados do DataFrame,
-use uma das ferramentas disponíveis.
-
-Não invente números.
-
-Se a pergunta puder ser respondida usando uma ferramenta,
-utilize a ferramenta.
-
-Depois de receber o resultado da ferramenta,
-responda ao usuário de forma clara e didática.
-"""
+            "content": PROMPT_AGENTE
         },
 
         {
@@ -355,153 +355,165 @@ responda ao usuário de forma clara e didática.
 
     ]
 
+    # Primeira chamada da LLM
+    resposta_llm = perguntar_llm(
+        mensagens,
+        max_new_tokens=300
+    )
 
-    # ========================================================
-    # LOOP DO AGENTE
-    # ========================================================
+    print("\n--- DECISÃO DA LLM ---")
+    print(resposta_llm)
 
-    while True:
+    # Tentar interpretar a resposta como JSON
+    try:
 
-        resposta = chat(
+        decisao = json.loads(resposta_llm)
 
-            model="qwen3",
+    except:
 
-            messages=mensagens,
-
-            tools=tools
+        trecho = re.search(
+            r'\{.*\}',
+            resposta_llm,
+            re.DOTALL
         )
 
+        if trecho:
 
-        # ====================================================
-        # SE A LLM NÃO QUISER USAR TOOL
-        # ====================================================
+            try:
 
-        if not resposta.message.tool_calls:
+                decisao = json.loads(
+                    trecho.group()
+                )
 
-            return resposta.message.content
+            except:
 
+                return resposta_llm
 
-        # ====================================================
-        # ADICIONA A RESPOSTA DA LLM AO HISTÓRICO
-        # ====================================================
+        else:
 
-        mensagens.append(
-            resposta.message
+            return resposta_llm
+
+    # Caso a LLM responda diretamente
+    if decisao.get("acao") == "responder":
+
+        return decisao.get(
+            "resposta",
+            "Não consegui gerar uma resposta."
         )
 
+    # Caso a LLM queira usar uma Tool
+    if decisao.get("acao") == "usar_tool":
 
-        # ====================================================
-        # EXECUTA AS TOOLS
-        # ====================================================
+        nome_tool = decisao.get("tool")
 
-        for chamada in resposta.message.tool_calls:
+        argumentos = decisao.get(
+            "argumentos",
+            {}
+        )
 
-            nome_tool = chamada.function.name
+        # Verifica se a Tool existe
+        if nome_tool not in FUNCOES:
 
-            argumentos = chamada.function.arguments
-
-
-            # -----------------------------------------------
-            # Verifica se a ferramenta existe
-            # -----------------------------------------------
-
-            if nome_tool not in funcoes:
-
-                resultado = {
-                    "erro":
-                    f"Ferramenta {nome_tool} não encontrada."
-                }
-
-            else:
-
-                try:
-
-                    funcao = funcoes[nome_tool]
-
-                    resultado = funcao(
-                        **argumentos
-                    )
-
-                except Exception as erro:
-
-                    resultado = {
-                        "erro": str(erro)
-                    }
-
-
-            # -----------------------------------------------
-            # Envia o resultado para a LLM
-            # -----------------------------------------------
-
-            mensagens.append(
-                {
-                    "role": "tool",
-                    "tool_name": nome_tool,
-                    "content": str(resultado)
-                }
+            return (
+                f"A ferramenta '{nome_tool}' "
+                "não existe."
             )
 
+        # Recupera a função Python
+        funcao = FUNCOES[nome_tool]
 
-# ============================================================
-# 6. DASHBOARD
-# ============================================================
+        # Executa a função
+        try:
 
-st.divider()
+            resultado = funcao(
+                **argumentos
+            )
 
-st.header("📊 Dados do IBGE")
+        except Exception as erro:
 
-col1, col2, col3 = st.columns(3)
+            return f"Erro na ferramenta: {erro}"
 
+        print("\n--- TOOL UTILIZADA ---")
+        print(nome_tool)
 
-# Quantidade de estados
+        print("\n--- RESULTADO DA TOOL ---")
+        print(resultado)
 
-quantidade_estados = contar_estados()["quantidade_estados"]
+        # Envia o resultado novamente para a LLM
+        mensagens.append(
+            {
+                "role": "assistant",
+                "content": resposta_llm
+            }
+        )
 
-col1.metric(
-    "Estados brasileiros",
-    quantidade_estados
+        mensagens.append(
+            {
+                "role": "user",
+                "content": f"""
+A ferramenta {nome_tool} foi executada.
+
+Resultado:
+
+{json.dumps(
+    resultado,
+    ensure_ascii=False
+)}
+
+Agora responda à pergunta original
+utilizando esse resultado.
+
+Não invente informações.
+
+Responda somente em linguagem natural,
+sem JSON.
+"""
+            }
+        )
+
+        resposta_final = perguntar_llm(
+            mensagens,
+            max_new_tokens=300
+        )
+
+        return resposta_final
+
+    return resposta_llm
+
+pergunta = "Quantos estados existem no Brasil?"
+
+resposta = executar_agente(
+    pergunta
 )
 
+print("\n==============================")
+print("RESPOSTA FINAL")
+print("==============================")
+print(resposta)
 
-# Região com mais estados
+perguntas = [
+    "Quantos estados existem no Brasil?",
+    "Qual região possui mais estados?",
+    "Qual região possui menos estados?",
+    "Quais são os estados do Nordeste?",
+    "Quantos estados existem no Nordeste?",
+    "Qual estado corresponde à sigla PB?",
+    "A Paraíba pertence a qual região?",
+    "Quais são as regiões brasileiras?"
+]
 
-mais = regiao_com_mais_estados()
+for pergunta in perguntas:
 
-col2.metric(
-    "Região com mais estados",
-    mais["regiao"],
-    f'{mais["quantidade"]} estados'
-)
+    print("\n" + "=" * 70)
+    print("PERGUNTA:", pergunta)
+    print("=" * 70)
 
+    resposta = executar_agente(
+        pergunta
+    )
 
-# Região com menos estados
-
-menos = regiao_com_menos_estados()
-
-col3.metric(
-    "Região com menos estados",
-    menos["regiao"],
-    f'{menos["quantidade"]} estados'
-)
-
-
-# ============================================================
-# 7. MOSTRAR DATAFRAME
-# ============================================================
-
-st.subheader("Tabela de estados")
-
-st.dataframe(
-    df,
-    use_container_width=True
-)
-
-
-# ============================================================
-# 8. GRÁFICO 1
-# ============================================================
-
-st.subheader("Quantidade de estados por região")
+    print("\nRESPOSTA:")
+    print(resposta)
 
 df_estados = df[
     df["sigla"] != "DF"
@@ -516,168 +528,43 @@ df_regioes = (
     )
 )
 
-grafico1 = px.bar(
+fig1 = px.bar(
     df_regioes,
     x="regiao",
     y="quantidade_estados",
-    title="Estados por região"
+    title="Quantidade de estados por região",
+    labels={
+        "regiao": "Região",
+        "quantidade_estados": "Quantidade de estados"
+    }
 )
 
-st.plotly_chart(
-    grafico1,
-    use_container_width=True
-)
+fig1.show()
 
 
-# ============================================================
-# 9. GRÁFICO 2
-# ============================================================
-
-st.subheader("Distribuição dos estados por região")
-
-grafico2 = px.pie(
+fig2 = px.pie(
     df_regioes,
     names="regiao",
     values="quantidade_estados",
-    title="Distribuição dos estados brasileiros"
+    title="Distribuição dos estados por região"
 )
 
-st.plotly_chart(
-    grafico2,
-    use_container_width=True
-)
+fig2.show()
 
 
-# ============================================================
-# 10. GRÁFICO 3
-# ============================================================
-
-st.subheader("Estados de uma região")
-
-regiao_selecionada = st.selectbox(
-    "Escolha uma região:",
-    sorted(
-        df_estados["regiao"].unique()
-    )
-)
+regiao_selecionada = "Nordeste"
 
 df_filtrado = df_estados[
     df_estados["regiao"] == regiao_selecionada
 ]
 
-grafico3 = px.bar(
+fig3 = px.bar(
     df_filtrado,
     x="estado",
-    y=[1] * len(df_filtrado),
-    title=f"Estados da região {regiao_selecionada}"
+    title=f"Estados da região {regiao_selecionada}",
+    labels={
+        "estado": "Estado"
+    }
 )
 
-grafico3.update_layout(
-    yaxis_title="Quantidade"
-)
-
-st.plotly_chart(
-    grafico3,
-    use_container_width=True
-)
-
-
-# ============================================================
-# 11. CHAT COM A LLM
-# ============================================================
-
-st.divider()
-
-st.header("🤖 Pergunte sobre os dados")
-
-
-st.write(
-    "Faça perguntas sobre os estados e regiões brasileiras."
-)
-
-
-# Histórico da conversa
-
-if "mensagens_chat" not in st.session_state:
-
-    st.session_state.mensagens_chat = []
-
-
-# Mostrar histórico
-
-for mensagem in st.session_state.mensagens_chat:
-
-    with st.chat_message(
-        mensagem["role"]
-    ):
-
-        st.markdown(
-            mensagem["content"]
-        )
-
-
-# Entrada do usuário
-
-pergunta = st.chat_input(
-    "Ex.: Qual região possui mais estados?"
-)
-
-
-if pergunta:
-
-    # -----------------------------------------------
-    # Mostra pergunta
-    # -----------------------------------------------
-
-    st.session_state.mensagens_chat.append(
-        {
-            "role": "user",
-            "content": pergunta
-        }
-    )
-
-
-    with st.chat_message("user"):
-
-        st.markdown(pergunta)
-
-
-    # -----------------------------------------------
-    # Executa agente
-    # -----------------------------------------------
-
-    with st.chat_message("assistant"):
-
-        with st.spinner(
-            "A LLM está analisando os dados..."
-        ):
-
-            try:
-
-                resposta = executar_agente(
-                    pergunta
-                )
-
-            except Exception as erro:
-
-                resposta = (
-                    "Ocorreu um erro ao consultar a LLM.\n\n"
-                    f"Detalhes: {erro}"
-                )
-
-
-        st.markdown(
-            resposta
-        )
-
-
-    # -----------------------------------------------
-    # Salva resposta
-    # -----------------------------------------------
-
-    st.session_state.mensagens_chat.append(
-        {
-            "role": "assistant",
-            "content": resposta
-        }
-    )
+fig3.show()
