@@ -1,809 +1,322 @@
-# ============================================================
-# IMPORTAÇÃO DAS BIBLIOTECAS
-# ============================================================
-
-import streamlit as st
 import requests
 import pandas as pd
 import plotly.express as px
-import json
-
-from openai import OpenAI
-
-
-# ============================================================
-# CONFIGURAÇÃO DA PÁGINA
-# ============================================================
-
-st.set_page_config(
-    page_title="Dashboard IBGE com Agente de IA",
-    page_icon="🤖",
-    layout="wide"
-)
+import streamlit as st
+import ollama
 
 
 # ============================================================
-# CONFIGURAÇÃO DA OPENAI
+# 1. BUSCAR OS DADOS DO IBGE
 # ============================================================
 
-client = OpenAI(
-    api_key=st.secrets["OPENAI_API_KEY"]
-)
+url = "https://servicodados.ibge.gov.br/api/v1/localidades/estados"
 
-# ============================================================
-# FUNÇÃO 1
-# BUSCAR DADOS NA API DO IBGE
-# ============================================================
+resposta = requests.get(url)
+resposta.raise_for_status()
 
-@st.cache_data
-def buscar_dados_ibge():
-
-    # Endpoint da API do IBGE
-    url = (
-        "https://servicodados.ibge.gov.br/"
-        "api/v1/localidades/estados"
-    )
-
-    # Faz a requisição
-    resposta = requests.get(url)
-
-    # Verifica se ocorreu algum erro
-    resposta.raise_for_status()
-
-    # Converte o JSON em objeto Python
-    dados = resposta.json()
-
-    return dados
+dados = resposta.json()
 
 
 # ============================================================
-# FUNÇÃO 2
-# TRANSFORMAR OS DADOS EM DATAFRAME
+# 2. TRANSFORMAR OS DADOS EM DATAFRAME
 # ============================================================
 
-@st.cache_data
-def criar_dataframe(dados):
+df = pd.json_normalize(dados)
 
-    # Normaliza o JSON
-    df = pd.json_normalize(dados)
-
-    # Seleciona as colunas necessárias
-    df = df[
-        [
-            "id",
-            "sigla",
-            "nome",
-            "regiao.nome"
-        ]
-    ]
-
-    # Renomeia as colunas
-    df.columns = [
-        "codigo",
+df = df[
+    [
+        "id",
         "sigla",
-        "estado",
-        "regiao"
+        "nome",
+        "regiao.nome"
     ]
+]
 
-    # Ordena os estados
-    df = df.sort_values(
-        by=["regiao", "estado"]
-    )
+df.columns = [
+    "codigo",
+    "sigla",
+    "estado",
+    "regiao"
+]
 
-    # Reinicia os índices
-    df = df.reset_index(
-        drop=True
-    )
-
-    return df
+df = df.sort_values(
+    by=["regiao", "estado"]
+).reset_index(drop=True)
 
 
 # ============================================================
-# FUNÇÕES QUE O AGENTE PODERÁ UTILIZAR
+# 3. FUNÇÕES QUE SERÃO UTILIZADAS COMO TOOLS
 # ============================================================
-
-
-# ------------------------------------------------------------
-# FUNÇÃO: CONTAR ESTADOS
-# ------------------------------------------------------------
 
 def contar_estados(df):
+    """
+    Retorna a quantidade total de estados.
+    """
+    return len(df)
 
-    total = len(df)
-
-    return {
-        "quantidade_estados": total
-    }
-
-
-# ------------------------------------------------------------
-# FUNÇÃO: REGIÃO COM MAIS ESTADOS
-# ------------------------------------------------------------
 
 def regiao_com_mais_estados(df):
+    """
+    Retorna a região que possui mais estados.
+    """
 
-    # Conta quantos estados existem em cada região
-    contagem = (
-        df
-        .groupby("regiao")
+    resultado = (
+        df.groupby("regiao")
         .size()
-        .reset_index(
-            name="quantidade_estados"
-        )
+        .sort_values(ascending=False)
     )
 
-    # Identifica a maior quantidade
-    maior = contagem.loc[
-        contagem[
-            "quantidade_estados"
-        ].idxmax()
-    ]
-
     return {
-        "regiao": maior["regiao"],
-        "quantidade_estados":
-            int(maior["quantidade_estados"])
+        "regiao": resultado.index[0],
+        "quantidade": int(resultado.iloc[0])
     }
 
-
-# ------------------------------------------------------------
-# FUNÇÃO: REGIÃO COM MENOS ESTADOS
-# ------------------------------------------------------------
 
 def regiao_com_menos_estados(df):
+    """
+    Retorna a região que possui menos estados.
+    """
 
-    # Conta os estados de cada região
-    contagem = (
-        df
-        .groupby("regiao")
+    resultado = (
+        df.groupby("regiao")
         .size()
-        .reset_index(
-            name="quantidade_estados"
-        )
+        .sort_values()
     )
 
-    # Identifica a menor quantidade
-    menor = contagem.loc[
-        contagem[
-            "quantidade_estados"
-        ].idxmin()
-    ]
-
     return {
-        "regiao": menor["regiao"],
-        "quantidade_estados":
-            int(menor["quantidade_estados"])
+        "regiao": resultado.index[0],
+        "quantidade": int(resultado.iloc[0])
     }
 
-
-# ------------------------------------------------------------
-# FUNÇÃO: LISTAR ESTADOS DE UMA REGIÃO
-# ------------------------------------------------------------
 
 def estados_por_regiao(df, regiao):
+    """
+    Retorna os estados pertencentes a uma região.
+    """
 
-    # Filtra a região
     resultado = df[
-        df["regiao"]
-        .str.lower()
-        == regiao.lower()
+        df["regiao"].str.lower() == regiao.lower()
     ]
 
-    # Obtém os estados
-    estados = (
-        resultado["estado"]
-        .sort_values()
-        .tolist()
-    )
-
-    return {
-        "regiao": regiao,
-        "estados": estados,
-        "quantidade": len(estados)
-    }
+    return resultado["estado"].tolist()
 
 
 # ============================================================
-# FERRAMENTAS DISPONÍVEIS PARA A LLM
+# 4. DEFINIR AS TOOLS DO OLLAMA
 # ============================================================
 
 tools = [
-
-    # --------------------------------------------------------
-    # FERRAMENTA 1
-    # --------------------------------------------------------
-
-    {
-        "type": "function",
-
-        "name": "contar_estados",
-
-        "description": (
-            "Use esta função para descobrir "
-            "a quantidade total de estados "
-            "presentes no DataFrame."
-        ),
-
-        "parameters": {
-            "type": "object",
-
-            "properties": {}
-        }
-    },
-
-
-    # --------------------------------------------------------
-    # FERRAMENTA 2
-    # --------------------------------------------------------
-
-    {
-        "type": "function",
-
-        "name": "regiao_com_mais_estados",
-
-        "description": (
-            "Use esta função quando o usuário "
-            "perguntar qual região brasileira "
-            "possui a maior quantidade de estados."
-        ),
-
-        "parameters": {
-            "type": "object",
-
-            "properties": {}
-        }
-    },
-
-
-    # --------------------------------------------------------
-    # FERRAMENTA 3
-    # --------------------------------------------------------
-
-    {
-        "type": "function",
-
-        "name": "regiao_com_menos_estados",
-
-        "description": (
-            "Use esta função quando o usuário "
-            "perguntar qual região brasileira "
-            "possui a menor quantidade de estados."
-        ),
-
-        "parameters": {
-            "type": "object",
-
-            "properties": {}
-        }
-    },
-
-
-    # --------------------------------------------------------
-    # FERRAMENTA 4
-    # --------------------------------------------------------
-
-    {
-        "type": "function",
-
-        "name": "estados_por_regiao",
-
-        "description": (
-            "Use esta função para listar os "
-            "estados que pertencem a uma "
-            "determinada região brasileira."
-        ),
-
-        "parameters": {
-
-            "type": "object",
-
-            "properties": {
-
-                "regiao": {
-
-                    "type": "string",
-
-                    "description": (
-                        "Nome da região brasileira. "
-                        "Exemplos: Norte, Nordeste, "
-                        "Centro-Oeste, Sudeste ou Sul."
-                    )
-                }
-            },
-
-            "required": [
-                "regiao"
-            ]
-        }
-    }
+    contar_estados,
+    regiao_com_mais_estados,
+    regiao_com_menos_estados,
+    estados_por_regiao
 ]
 
 
 # ============================================================
-# FUNÇÃO RESPONSÁVEL POR EXECUTAR AS FERRAMENTAS
+# 5. FUNÇÃO DO AGENTE
 # ============================================================
 
-def executar_ferramenta(
-    nome_funcao,
-    argumentos,
-    df
-):
+def executar_agente(pergunta, df):
 
-    # --------------------------------------------------------
-    # CONTAR ESTADOS
-    # --------------------------------------------------------
+    mensagens = [
+        {
+            "role": "system",
+            "content": """
+            Você é um assistente especializado em analisar
+            dados dos estados brasileiros.
 
-    if nome_funcao == "contar_estados":
+            Utilize as ferramentas disponíveis sempre que
+            a pergunta depender dos dados do DataFrame.
 
-        resultado = contar_estados(
-            df
-        )
+            Não invente informações.
 
-
-    # --------------------------------------------------------
-    # REGIÃO COM MAIS ESTADOS
-    # --------------------------------------------------------
-
-    elif nome_funcao == (
-        "regiao_com_mais_estados"
-    ):
-
-        resultado = (
-            regiao_com_mais_estados(
-                df
-            )
-        )
-
-
-    # --------------------------------------------------------
-    # REGIÃO COM MENOS ESTADOS
-    # --------------------------------------------------------
-
-    elif nome_funcao == (
-        "regiao_com_menos_estados"
-    ):
-
-        resultado = (
-            regiao_com_menos_estados(
-                df
-            )
-        )
-
-
-    # --------------------------------------------------------
-    # ESTADOS POR REGIÃO
-    # --------------------------------------------------------
-
-    elif nome_funcao == (
-        "estados_por_regiao"
-    ):
-
-        resultado = (
-            estados_por_regiao(
-
-                df,
-
-                argumentos["regiao"]
-
-            )
-        )
-
-
-    # --------------------------------------------------------
-    # CASO A FUNÇÃO NÃO EXISTA
-    # --------------------------------------------------------
-
-    else:
-
-        resultado = {
-            "erro":
-                "Ferramenta não encontrada."
+            Responda em português de forma clara e objetiva.
+            """
+        },
+        {
+            "role": "user",
+            "content": pergunta
         }
+    ]
 
-
-    return resultado
-
-
-# ============================================================
-# AGENTE COM LLM
-# ============================================================
-
-def agente_llm(pergunta, df):
-
-
-    # --------------------------------------------------------
-    # ETAPA 1
-    # A LLM RECEBE A PERGUNTA E DECIDE QUAL FERRAMENTA USAR
-    # --------------------------------------------------------
-
-    resposta = client.responses.create(
-
-        # Escolha um modelo disponível na sua conta.
-        model="gpt-5",
-
-        instructions="""
-        Você é um agente especializado em
-        analisar dados sobre os estados brasileiros.
-
-        Você deve responder às perguntas do usuário
-        utilizando as ferramentas disponíveis.
-
-        Sempre que precisar de uma informação que esteja
-        no DataFrame, utilize uma ferramenta.
-
-        Não invente dados.
-
-        Responda sempre em português.
-        """,
-
-        input=pergunta,
-
-        tools=tools,
-
-        tool_choice="auto"
+    # Primeira chamada ao modelo
+    resposta = ollama.chat(
+        model="gemma4",
+        messages=mensagens,
+        tools=tools
     )
 
+    # Verifica se o modelo solicitou alguma ferramenta
+    if resposta.message.tool_calls:
 
-    # --------------------------------------------------------
-    # PROCURA UMA CHAMADA DE FUNÇÃO
-    # --------------------------------------------------------
+        # Adiciona a resposta do modelo ao histórico
+        mensagens.append(resposta.message)
 
-    for item in resposta.output:
+        # Percorre as ferramentas solicitadas
+        for chamada in resposta.message.tool_calls:
 
+            nome_funcao = chamada.function.name
+            argumentos = chamada.function.arguments
 
-        # Verifica se a LLM solicitou
-        # a execução de uma função
-        if item.type == "function_call":
+            # -----------------------------------------------
+            # Executa a ferramenta solicitada
+            # -----------------------------------------------
 
+            if nome_funcao == "contar_estados":
 
-            # Nome da função escolhida pela LLM
-            nome_funcao = item.name
+                resultado = contar_estados(df)
 
+            elif nome_funcao == "regiao_com_mais_estados":
 
-            # Argumentos enviados pela LLM
-            argumentos = json.loads(
-                item.arguments
-            )
+                resultado = regiao_com_mais_estados(df)
 
+            elif nome_funcao == "regiao_com_menos_estados":
 
-            # ------------------------------------------------
-            # EXECUTA A FUNÇÃO NO DATAFRAME
-            # ------------------------------------------------
+                resultado = regiao_com_menos_estados(df)
 
-            resultado = executar_ferramenta(
+            elif nome_funcao == "estados_por_regiao":
 
-                nome_funcao,
+                regiao = argumentos["regiao"]
 
-                argumentos,
-
-                df
-
-            )
-
-
-            # ------------------------------------------------
-            # ETAPA 2
-            # ENVIA O RESULTADO PARA A LLM
-            # ------------------------------------------------
-
-            resposta_final = (
-                client.responses.create(
-
-                    model="gpt-5",
-
-                    instructions="""
-                    Você é um assistente especializado
-                    em análise de dados.
-
-                    Responda em português.
-
-                    Utilize exclusivamente os resultados
-                    fornecidos pela análise.
-
-                    Não invente informações.
-
-                    Responda de maneira clara e objetiva.
-                    """,
-
-                    input=f"""
-                    Pergunta do usuário:
-
-                    {pergunta}
-
-                    Resultado da análise:
-
-                    {json.dumps(
-                        resultado,
-                        ensure_ascii=False
-                    )}
-
-                    Responda à pergunta do usuário.
-                    """
+                resultado = estados_por_regiao(
+                    df,
+                    regiao
                 )
+
+            else:
+
+                resultado = "Ferramenta não encontrada."
+
+            # -----------------------------------------------
+            # Envia o resultado da ferramenta para o Ollama
+            # -----------------------------------------------
+
+            mensagens.append(
+                {
+                    "role": "tool",
+                    "content": str(resultado),
+                    "tool_name": nome_funcao
+                }
             )
 
+        # Segunda chamada ao modelo
+        # Agora o modelo possui o resultado da função
+        resposta_final = ollama.chat(
+            model="gemma4",
+            messages=mensagens
+        )
 
-            # Retorna a resposta final
-            return resposta_final.output_text
+        return resposta_final.message.content
 
-
-    # --------------------------------------------------------
-    # CASO A LLM NÃO TENHA UTILIZADO UMA FERRAMENTA
-    # --------------------------------------------------------
-
-    return resposta.output_text
-
-
-# ============================================================
-# INÍCIO DO DASHBOARD
-# ============================================================
-
-st.title(
-    "🇧🇷 Dashboard de Estados Brasileiros"
-)
-
-st.write(
-    "Dashboard criado com dados da API do IBGE, "
-    "Pandas, Plotly, Streamlit e OpenAI."
-)
+    # Caso nenhuma ferramenta tenha sido utilizada
+    return resposta.message.content
 
 
 # ============================================================
-# BUSCAR OS DADOS
+# 6. DASHBOARD STREAMLIT
 # ============================================================
 
-with st.spinner(
-    "Buscando dados da API do IBGE..."
-):
-
-    dados = buscar_dados_ibge()
+st.title("🇧🇷 Dashboard dos Estados Brasileiros")
 
 
 # ============================================================
-# CRIAR O DATAFRAME
+# 7. MOSTRAR DATAFRAME
 # ============================================================
 
-df = criar_dataframe(
-    dados
-)
+st.subheader("Dados dos estados")
 
-
-# ============================================================
-# MOSTRAR O DATAFRAME
-# ============================================================
-
-st.subheader(
-    "Dados dos Estados Brasileiros"
-)
-
-st.dataframe(
-    df,
-    use_container_width=True
-)
+st.dataframe(df)
 
 
 # ============================================================
-# PREPARAR DADOS PARA OS GRÁFICOS
+# 8. GRÁFICO 1 — QUANTIDADE DE ESTADOS POR REGIÃO
 # ============================================================
 
 df_regioes = (
-
-    df
-
-    .groupby(
-        "regiao"
-    )
-
+    df.groupby("regiao")
     .size()
-
-    .reset_index(
-        name="quantidade_estados"
-    )
+    .reset_index(name="quantidade_estados")
 )
 
-
-# ============================================================
-# GRÁFICO 1
-# QUANTIDADE DE ESTADOS POR REGIÃO
-# ============================================================
-
-st.subheader(
-    "Gráfico 1 — Quantidade de Estados por Região"
-)
-
-
-fig1 = px.bar(
-
+grafico1 = px.bar(
     df_regioes,
-
     x="regiao",
-
     y="quantidade_estados",
-
-    title=(
-        "Quantidade de Estados "
-        "por Região"
-    ),
-
-    labels={
-        "regiao": "Região",
-
-        "quantidade_estados":
-            "Quantidade de Estados"
-    }
+    title="Quantidade de estados por região"
 )
 
-
 st.plotly_chart(
-
-    fig1,
-
+    grafico1,
     use_container_width=True
 )
 
 
 # ============================================================
-# GRÁFICO 2
-# DISTRIBUIÇÃO DOS ESTADOS
+# 9. GRÁFICO 2 — DISTRIBUIÇÃO DOS ESTADOS
 # ============================================================
 
-st.subheader(
-    "Gráfico 2 — Distribuição dos Estados por Região"
-)
-
-
-fig2 = px.pie(
-
+grafico2 = px.pie(
     df_regioes,
-
     names="regiao",
-
     values="quantidade_estados",
-
-    title=(
-        "Distribuição dos Estados "
-        "por Região"
-    )
+    title="Distribuição dos estados por região"
 )
 
-
 st.plotly_chart(
-
-    fig2,
-
+    grafico2,
     use_container_width=True
 )
 
 
 # ============================================================
-# GRÁFICO 3
-# ESTADOS DA REGIÃO SELECIONADA
+# 10. GRÁFICO 3 — ESTADOS DE UMA REGIÃO
 # ============================================================
 
-st.subheader(
-    "Gráfico 3 — Estados por Região"
-)
-
-
-# Obtém as regiões
-regioes = sorted(
-    df["regiao"].unique()
-)
-
-
-# Permite ao usuário escolher
 regiao_selecionada = st.selectbox(
-
     "Escolha uma região:",
-
-    regioes
+    sorted(df["regiao"].unique())
 )
 
-
-# Filtra os dados
-df_filtrado = df[
-
-    df["regiao"]
-    == regiao_selecionada
-
+df_selecionado = df[
+    df["regiao"] == regiao_selecionada
 ]
 
-
-# Cria o gráfico
-fig3 = px.bar(
-
-    df_filtrado,
-
+grafico3 = px.bar(
+    df_selecionado,
     x="estado",
-
-    title=(
-        f"Estados da Região "
-        f"{regiao_selecionada}"
-    ),
-
-    labels={
-        "estado": "Estado"
-    }
+    y="codigo",
+    title=f"Estados da região {regiao_selecionada}"
 )
 
-
-# Mostra o gráfico
 st.plotly_chart(
-
-    fig3,
-
+    grafico3,
     use_container_width=True
 )
 
 
 # ============================================================
-# AGENTE DE IA
+# 11. CHAT COM O AGENTE
 # ============================================================
 
-st.divider()
+st.subheader("🤖 Assistente de dados")
 
-
-st.header(
-    "🤖 Agente de Análise de Dados"
-)
-
-
-st.write(
-    "Faça perguntas sobre os dados "
-    "apresentados no dashboard."
-)
-
-
-# Campo de pergunta
 pergunta = st.chat_input(
-
-    "Exemplo: Qual região possui mais estados?"
+    "Pergunte algo sobre os estados..."
 )
-
-
-# ============================================================
-# EXECUTAR O AGENTE
-# ============================================================
 
 if pergunta:
 
-
-    # Mostra a pergunta
-    with st.chat_message(
-        "user"
-    ):
-
-        st.write(
-            pergunta
-        )
-
+    # Mostra a pergunta do usuário
+    with st.chat_message("user"):
+        st.write(pergunta)
 
     # Executa o agente
-    with st.chat_message(
-        "assistant"
-    ):
+    resposta = executar_agente(
+        pergunta,
+        df
+    )
 
-        with st.spinner(
-            "O agente está analisando os dados..."
-        ):
-
-            try:
-
-                resposta_agente = (
-                    agente_llm(
-                        pergunta,
-                        df
-                    )
-                )
-
-
-                st.write(
-                    resposta_agente
-                )
-
-
-            except Exception as erro:
-
-                st.error(
-                    f"Ocorreu um erro: {erro}"
-                )
+    # Mostra a resposta do agente
+    with st.chat_message("assistant"):
+        st.write(resposta)
