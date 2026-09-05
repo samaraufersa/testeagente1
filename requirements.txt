@@ -1,5 +1,6 @@
-streamlit
-ollama
-pandas
+json
+re
 requests
-plotly
+pandas
+plotly.express
+torch
